@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>iOS File Terminal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<style>
+    body {
+        background: black;
+        color: #0f0;
+        font-family: monospace;
+        margin: 0;
+        padding: 0;
+    }
+    #terminal {
+        padding: 12px;
+        white-space: pre-wrap;
+    }
+    #input {
+        width: 100%;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #0f0;
+        font-family: monospace;
+        font-size: 16px;
+    }
+    #accessBox {
+        background: #111;
+        position: fixed;
+        inset: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-direction: column;
+        text-align: center;
+    }
+    button {
+        padding: 12px 18px;
+        background: #0a84ff;
+        border: none;
+        color: white;
+        font-size: 16px;
+        border-radius: 8px;
+        margin-top: 12px;
+    }
+</style>
+</head>
+
+<body>
+
+<div id="accessBox">
+    <h2>iOS Terminal</h2>
+    <p>This terminal needs permission to access a folder.</p>
+    <button id="pickDir">Choose Folder</button>
+</div>
+
+<div id="terminal"></div>
+<input id="input">
+
+<script>
+
+/* -------------------------------------
+   Global STATE
+-------------------------------------- */
+let rootHandle = null;      // Directory handle user selected
+let currentDir = null;      // Current working directory
+let currentPath = [];       // Path stack for cd navigation
+
+/* HTML refs */
+const term = document.getElementById("terminal");
+const input = document.getElementById("input");
+const pickBtn = document.getElementById("pickDir");
+const accessBox = document.getElementById("accessBox");
+
+/* -------------------------------------
+   UI Helpers
+-------------------------------------- */
+function print(s) {
+    term.textContent += s + "\n";
+    window.scrollTo(0, document.body.scrollHeight);
+}
+
+function prompt() {
+    print(`\n${currentPath.join("/") || "root"}> `);
+}
+
+input.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+        const cmd = input.value.trim();
+        input.value = "";
+        runCommand(cmd);
+    }
+});
+
+/* -------------------------------------
+   Directory Picker
+-------------------------------------- */
+pickBtn.onclick = async () => {
+    try {
+        rootHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+        currentDir = rootHandle;
+        currentPath = [];
+        accessBox.style.display = "none";
+
+        print("Folder access granted.\nType 'help' for commands.");
+        prompt();
+    } catch {
+        alert("Folder permission denied.");
+    }
+};
+
+/* -------------------------------------
+   FS Helpers
+-------------------------------------- */
+
+// Resolve a directory by walking path elements
+async function resolvePath(pathArr) {
+    let dir = rootHandle;
+    for (let part of pathArr) {
+        dir = await dir.getDirectoryHandle(part, { create: false });
+    }
+    return dir;
+}
+
+/* -------------------------------------
+   Commands
+-------------------------------------- */
+async function runCommand(line) {
+    print(line);
+
+    let [cmd, ...args] = line.split(" ");
+    cmd = cmd.toLowerCase();
+
+    try {
+
+        switch (cmd) {
+
+            case "dir":
+            case "ls":
+                for await (const entry of currentDir.values()) {
+                    print(entry.kind.toUpperCase() + " - " + entry.name);
+                }
+                break;
+
+            case "cd":
+                await cd(args[0]);
+                break;
+
+            case "mkdir":
+                await currentDir.getDirectoryHandle(args[0], { create: true });
+                break;
+
+            case "del":
+                await currentDir.removeEntry(args[0], { recursive: false });
+                break;
+
+            case "rmdir":
+                await currentDir.removeEntry(args[0], { recursive: true });
+                break;
+
+            case "echo":
+                print(args.join(" "));
+                break;
+
+            case "cls":
+                term.textContent = "";
+                break;
+
+            case "help":
+                help();
+                break;
+
+            case "spec":
+                spec();
+                break;
+
+            case "web":
+                window.open(args[0], "_blank");
+                break;
+
+            case "credits":
+                print("Created by Adam T. Nassar");
+                break;
+
+            case "ping":
+                print("Pinging " + args[0] + " ...");
+                setTimeout(() => print("Reply from " + args[0]), 700);
+                break;
+
+            case "base64en":
+                base64en(args.join(" "));
+                break;
+
+            case "run":
+                await runScript(args[0]);
+                break;
+
+            default:
+                print("Unknown command. Type 'help'.");
+        }
+
+    } catch (e) {
+        print("Error: " + e.message);
+    }
+
+    prompt();
+}
+
+/* -------------------------------------
+   cd command
+-------------------------------------- */
+async function cd(folder) {
+    if (!folder) return print("Usage: cd <folder>");
+
+    if (folder === "..") {
+        if (currentPath.length > 0) {
+            currentPath.pop();
+            currentDir = await resolvePath(currentPath);
+        }
+        return;
+    }
+
+    let newDir = await currentDir.getDirectoryHandle(folder);
+    currentPath.push(folder);
+    currentDir = newDir;
+}
+
+/* -------------------------------------
+   cipt script execution
+-------------------------------------- */
+async function runScript(filename) {
+    const file = await currentDir.getFileHandle(filename).then(h => h.getFile());
+    const text = await file.text();
+    const lines = text.split("\n");
+
+    for (let l of lines) {
+        if (l.trim()) await runCommand(l.trim());
+    }
+}
+
+/* -------------------------------------
+   base64 encode
+-------------------------------------- */
+function base64en(text) {
+    try {
+        print(btoa(text));
+    } catch {
+        print("Base64 error.");
+    }
+}
+
+/* -------------------------------------
+   help
+-------------------------------------- */
+function help() {
+    print(`
+Commands:
+dir, ls             - list folder
+cd <folder>         - change dir
+mkdir <name>        - make folder
+del <file>          - delete file
+rmdir <dir>         - delete folder
+echo <text>         - print
+cls                 - clear screen
+spec                - device info
+ping <host>         - simulate ping
+web <url>           - open URL
+credits             - creator name
+run <file>          - run .cipt script
+base64en <text>     - base64 encode
+`);
+}
+
+/* -------------------------------------
+   device spec
+-------------------------------------- */
+function spec() {
+    print("User Agent: " + navigator.userAgent);
+    print("Screen: " + window.innerWidth + "x" + window.innerHeight);
+}
+
+</script>
+</body>
+</html>
