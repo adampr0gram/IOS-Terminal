@@ -2,72 +2,62 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>iOS Terminal</title>
 
 <link rel="manifest" href="/manifest.json">
-
-<!-- iOS PWA -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <link rel="apple-touch-icon" href="/icons/192.png">
 
-<!-- Xterm -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
 <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
 
 <style>
-    html, body {
-        margin: 0;
-        padding: env(safe-area-inset-top) env(safe-area-inset-right)
-                 env(safe-area-inset-bottom) env(safe-area-inset-left);
-        width: 100%;
-        height: 100%;
-        background: #000000;
-        overflow: hidden;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
+@font-face {
+    font-family: "Monaco";
+    src: url("https://cdn.jsdelivr.net/gh/iamadamdev/fonts/Monaco.woff2") format("woff2");
+    font-weight: normal;
+    font-style: normal;
+}
 
-    #terminal {
-        width: 100%;
-        height: 100%;
-    }
+html, body {
+    margin: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+}
 
-    /* Permission Popup */
-    #permissionPopup {
-        position: fixed;
-        inset: 0;
-        background: rgba(0,0,0,0.85);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 9999;
-    }
-    #popupBox {
-        background: #0d0d0d;
-        padding: 22px;
-        border-radius: 10px;
-        border: 1px solid #333;
-        width: 280px;
-        text-align: center;
-        color: #00ff55;
-    }
-    #chooseFolder {
-        margin-top: 12px;
-        width: 100%;
-        padding: 10px;
-        border-radius: 6px;
-        border: none;
-        background: #00cc44;
-        color: black;
-        font-weight: 600;
-        font-size: 16px;
-    }
+#terminal { width: 100%; height: 100%; }
+
+#permissionPopup {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+}
+#popupBox {
+    background: #0d0d0d;
+    padding: 22px;
+    border-radius: 10px;
+    border: 1px solid #333;
+    width: 280px;
+    text-align: center;
+    color: #fff;
+}
+#chooseFolder {
+    margin-top: 12px;
+    width: 100%; padding: 10px;
+    border-radius: 6px;
+    border: none;
+    background: #fff; color: #000;
+    font-weight: 600; font-size: 16px;
+}
 </style>
 </head>
 <body>
-
 <div id="terminal"></div>
 
 <div id="permissionPopup">
@@ -79,27 +69,30 @@
 </div>
 
 <script>
-/* Terminal Initialization */
-const term = new Terminal({
-    theme: {
-        background: "#000000",
-        foreground: "#00ff55",   // Green text
-        cursor: "#00ff55"
-    },
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    fontSize: 14,                // Smaller font size
-    cursorBlink: true,
-    lineHeight: 1.15
-});
-
 let dirHandle = null;
 let buffer = "";
+let cursorVisible = true;
+
+const term = new Terminal({
+    theme: { background: "#000", foreground: "#fff", cursor: "#ffffff" },
+    fontFamily: "Monaco, monospace",
+    fontSize: 14,
+    cursorBlink: true,
+    letterSpacing: 0,
+    lineHeight: 1.2
+});
 
 term.open(document.getElementById("terminal"));
-term.writeln("iOS Terminal Ready\n");
+
+term.writeln("iOS Terminal Ready");
 term.write("$ ");
 
-/* Restore Folder Access */
+// blinking cursor (enhanced)
+setInterval(() => {
+    cursorVisible = !cursorVisible;
+    term.setOption("cursorStyle", cursorVisible ? "block" : "bar");
+}, 500);
+
 (async () => {
     const saved = localStorage.getItem("dir_saved");
     if (saved) {
@@ -114,7 +107,6 @@ term.write("$ ");
     }
 })();
 
-/* Folder Picker */
 document.getElementById("chooseFolder").onclick = async () => {
     try {
         dirHandle = await window.showDirectoryPicker();
@@ -129,11 +121,9 @@ document.getElementById("chooseFolder").onclick = async () => {
     }
 };
 
-/* Input Handling */
 term.onData(data => {
     if (data === "\r") {
-        const cmd = buffer.trim();
-        buffer = "";
+        const cmd = buffer.trim(); buffer = "";
         term.write("\n");
         handleCommand(cmd);
         term.write("\n$ ");
@@ -148,46 +138,75 @@ term.onData(data => {
     }
 });
 
-/* REAL PING */
 async function realPing(host) {
     const url = host.startsWith("http") ? host : `https://${host}`;
     const start = performance.now();
     try {
         await fetch(url, { mode: "no-cors" });
-        const time = Math.round(performance.now() - start);
-        return `Reply from ${host}: time=${time}ms`;
+        return `Reply from ${host}: time=${Math.round(performance.now() - start)}ms`;
     } catch {
         return `Request timed out to ${host}`;
     }
 }
 
-/* Command Engine */
+async function nanoEditor(filename) {
+    term.writeln(`Opening nano: ${filename}`);
+    term.writeln("--- Press CTRL+X to save & exit ---");
+
+    let fileHandle;
+    let existing = "";
+
+    try {
+        fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+        const file = await fileHandle.getFile();
+        existing = await file.text();
+    } catch {}
+
+    let content = existing;
+    term.writeln(content);
+
+    const disposer = term.onData(async key => {
+        if (key === "\u0018") { // CTRL+X
+            disposer.dispose();
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            term.writeln("\nSaved.");
+            term.write("$ ");
+        } else if (key === "\r") {
+            content += "\n";
+            term.write("\n");
+        } else if (key === "\u007F") {
+            content = content.slice(0, -1);
+            term.write("\b \b");
+        } else {
+            content += key;
+            term.write(key);
+        }
+    });
+}
+
 async function handleCommand(cmd) {
     if (!cmd) return;
-
     const [base, ...args] = cmd.split(" ");
 
     switch (base) {
-        case "help":
-            term.writeln("Commands:");
-            term.writeln(" help, ls/dir, cd, mkdir, rmdir, del, cls");
-            term.writeln(" spec, echo, ping, web, credits, run, base64en, exit");
+        case "nano":
+            if (!args[0]) return term.writeln("Usage: nano <file>");
+            if (!dirHandle) return term.writeln("No folder selected.");
+            nanoEditor(args[0]);
             break;
 
-        case "cls":
-            term.clear();
+        case "help":
+            term.writeln("Commands: help, ls, dir, cd, mkdir, rmdir, del, cls, spec, echo, ping, web, credits, nano, exit");
             break;
+
+        case "cls": term.clear(); break;
 
         case "ls":
         case "dir":
             if (!dirHandle) return term.writeln("No folder selected.");
-            for await (const entry of dirHandle.values()) {
-                term.writeln(entry.name);
-            }
-            break;
-
-        case "cd":
-            term.writeln("(cd is simulated only)");
+            for await (const entry of dirHandle.values()) term.writeln(entry.name);
             break;
 
         case "mkdir":
@@ -208,9 +227,7 @@ async function handleCommand(cmd) {
             term.writeln("File deleted.");
             break;
 
-        case "echo":
-            term.writeln(args.join(" "));
-            break;
+        case "echo": term.writeln(args.join(" ")); break;
 
         case "web":
             if (!args[0]) return term.writeln("Usage: web <url>");
@@ -221,8 +238,7 @@ async function handleCommand(cmd) {
         case "ping":
             if (!args[0]) return term.writeln("Usage: ping <host>");
             term.writeln("Pinging " + args[0] + "...");
-            const pingReply = await realPing(args[0]);
-            term.writeln(pingReply);
+            term.writeln(await realPing(args[0]));
             break;
 
         case "spec":
@@ -231,31 +247,15 @@ async function handleCommand(cmd) {
             term.writeln("Cores: " + navigator.hardwareConcurrency);
             break;
 
-        case "credits":
-            term.writeln("Adam T. Nassar");
-            break;
-
-        case "run":
-            term.writeln("CIPT scripting coming soon!");
-            break;
-
-        case "base64en":
-            term.writeln("Base64 encoder coming soon!");
-            break;
-
-        case "exit":
-            term.writeln("Goodbye!");
-            break;
+        case "credits": term.writeln("Adam T. Nassar"); break;
+        case "exit": term.writeln("Goodbye!"); break;
 
         default:
             term.writeln("Unknown command: " + base);
     }
 }
 
-/* Register Service Worker */
-if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/service-worker.js");
-}
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js");
 </script>
 
 </body>
