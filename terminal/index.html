@@ -3,262 +3,200 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>iOS Terminal</title>
+<title>iOS Terminal (File Access)</title>
 
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <link rel="apple-touch-icon" href="/icons/192.png">
 
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
-<script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-
 <style>
 @font-face {
     font-family: "Monaco";
     src: url("https://cdn.jsdelivr.net/gh/iamadamdev/fonts/Monaco.woff2") format("woff2");
-    font-weight: normal;
-    font-style: normal;
 }
-
 html, body {
-    margin: 0;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-    width: 100%;
-    height: 100%;
-    background: #000;
-    overflow: hidden;
+  height:100%; margin:0; background:#000; font-family: Monaco, monospace;
+  overflow:hidden;
 }
-
-#terminal { width: 100%; height: 100%; }
-
-#permissionPopup {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.85);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 9999;
-}
-#popupBox {
-    background: #0d0d0d;
-    padding: 22px;
-    border-radius: 10px;
-    border: 1px solid #333;
-    width: 280px;
-    text-align: center;
-    color: #fff;
-    font-family: Arial, sans-serif;
-}
-#chooseFolder {
-    margin-top: 12px;
-    width: 100%; padding: 10px;
-    border-radius: 6px;
-    border: none;
-    background: #fff; color: #000;
-    font-weight: 600; font-size: 16px;
-    font-family: Arial, sans-serif;
-}
+#terminal { width:100%; height:100%; }
 </style>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
 </head>
 <body>
 <div id="terminal"></div>
 
-<div id="permissionPopup">
-    <div id="popupBox">
-        <h3>Folder Access</h3>
-        <p>Select a folder so commands can read/write files.</p>
-        <button id="chooseFolder">Choose Folder</button>
-    </div>
-</div>
-
 <script>
-let dirHandle = null;
-let buffer = "";
-let cursorVisible = true;
-
+// ---------------- Terminal Setup ----------------
 const term = new Terminal({
-    theme: { background: "#000", foreground: "#fff", cursor: "#ffffff" },
-    fontFamily: "Monaco, monospace",
-    fontSize: 14,
-    cursorBlink: true,
-    letterSpacing: 0,
-    lineHeight: 1.2
+  theme: { background:'#000', foreground:'#fff', cursor:'#fff' },
+  fontFamily: 'Monaco, monospace',
+  fontSize: 14,
+  cursorBlink: true
 });
+term.open(document.getElementById('terminal'));
 
-term.open(document.getElementById("terminal"));
+term.writeln('iOS Terminal — Direct File Access');
+term.writeln('Type "help" for commands.');
 
-term.writeln("iOS Terminal Ready");
-term.write("$ ");
+let inputBuffer = '';
+let openedFiles = {}; // filename -> FileHandle
 
-// blinking cursor (enhanced)
-setInterval(() => {
-    cursorVisible = !cursorVisible;
-    term.setOption("cursorStyle", cursorVisible ? "block" : "bar");
-}, 500);
+function prompt(){ term.write("\n> "); }
+prompt();
 
-(async () => {
-    const saved = localStorage.getItem("dir_saved");
-    if (saved) {
-        try { dirHandle = await window.showDirectoryPicker(); } catch {}
+// ---------------- File Selection ----------------
+async function pickFiles(multiple){
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  if(multiple) picker.multiple = true;
+
+  return new Promise(res => {
+    picker.onchange = () => res([...picker.files]);
+    picker.click();
+  });
+}
+
+async function openFiles(cmd){
+  const multiple = !cmd.includes('-single');
+  const files = await pickFiles(multiple);
+  files.forEach(f => openedFiles[f.name] = f);
+  return files.length + ' file(s) opened';
+}
+
+async function readFile(name){
+  const f = openedFiles[name];
+  if(!f) return 'File not opened';
+  return await f.text();
+}
+
+async function writeFile(name, content){
+  const f = openedFiles[name];
+  if(!f) return 'File not opened';
+  term.writeln('⚠️ iOS Safari does NOT support writing back to chosen files.');
+  term.writeln('Use: export <filename> to download updated version.');
+}
+
+async function exportFile(name, content){
+  const blob = new Blob([content], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+}
+
+// ---------------- Commands ----------------
+async function handle(cmd){
+  const p = cmd.split(' ');
+  const c = p[0];
+  const args = p.slice(1);
+
+  switch(c){
+    case 'help':
+      term.writeln('Commands:');
+      term.writeln(' open        — Pick multiple files');
+      term.writeln(' open -single — Pick only 1 file');
+      term.writeln(' read <file>');
+      term.writeln(' write <file> <text>');
+      term.writeln(' export <file> — download edited file');
+      term.writeln(' nano <file>');
+      term.writeln(' base64en <text>');
+      term.writeln(' ping <host>');
+      term.writeln(' web <url>');
+      term.writeln(' credits');
+      break;
+
+    case 'open':
+      term.writeln(await openFiles(cmd));
+      break;
+
+    case 'read':
+      if(!args[0]) return term.writeln('Usage: read <file>');
+      const r = await readFile(args[0]);
+      term.writeln(r);
+      break;
+
+    case 'write':
+      if(!args[0]) return term.writeln('Usage: write <file> <text>');
+      await writeFile(args[0], args.slice(1).join(' '));
+      break;
+
+    case 'export':
+      if(!args[0]) return term.writeln('Usage: export <file>');
+      const dat = await readFile(args[0]);
+      await exportFile(args[0], dat);
+      term.writeln('Exported');
+      break;
+
+    case 'nano':
+      if(!args[0]) return term.writeln('Usage: nano <file>');
+      await nanoEditor(args[0]);
+      break;
+
+    case 'base64en':
+      term.writeln(btoa(args.join(' ')));
+      break;
+
+    case 'ping':
+      if(!args[0]) return term.writeln('Usage: ping <host>');
+      term.writeln('Pinging...');
+      try{ await fetch('https://' + args[0], {mode:'no-cors'}); term.writeln('Success'); }
+      catch(e){ term.writeln('Timeout'); }
+      break;
+
+    case 'web':
+      window.open(args[0], '_blank');
+      break;
+
+    case 'credits':
+      term.writeln('Adam T. Nassar');
+      break;
+
+    default:
+      term.writeln('Unknown command');
+  }
+}
+
+// ---------------- nano editor ----------------
+async function nanoEditor(file){
+  let content = await readFile(file) || '';
+  term.writeln('--- nano: ' + file + ' (Ctrl+X to save+exit) ---');
+  term.write(content);
+
+  let buf = content;
+  const listener = term.onData(k => {
+    if(k === '\u0018'){ // Ctrl+X
+      listener.dispose();
+      exportFile(file, buf);
+      term.writeln('\nSaved (downloaded)');
+      return;
     }
-    if (dirHandle) {
-        document.getElementById("permissionPopup").style.display = "none";
-        term.writeln("Folder permission restored.");
-        term.write("$ ");
-    } else {
-        term.writeln("Waiting for folder permission...");
-    }
-})();
+    if(k === '\u007F'){ buf = buf.slice(0,-1); term.write("\b \b"); return; }
+    if(k === '\r'){ buf += '\n'; term.write('\n'); return; }
+    buf += k; term.write(k);
+  });
+}
 
-document.getElementById("chooseFolder").onclick = async () => {
-    try {
-        dirHandle = await window.showDirectoryPicker();
-        await dirHandle.requestPermission({ mode: "readwrite" });
-        localStorage.setItem("dir_saved", "yes");
-        document.getElementById("permissionPopup").style.display = "none";
-        term.writeln("\nFolder selected.");
-        term.write("$ ");
-    } catch {
-        term.writeln("\nPermission denied.");
-        term.write("$ ");
+// ---------------- Input ----------------
+term.onData(e => {
+  if(e === '\r'){
+    const cmd = inputBuffer.trim();
+    inputBuffer = '';
+    term.write('\n');
+    handle(cmd);
+    prompt();
+  } else if(e === '\u007F'){
+    if(inputBuffer.length>0){
+      inputBuffer = inputBuffer.slice(0,-1);
+      term.write("\b \b");
     }
-};
-
-term.onData(data => {
-    if (data === "\r") {
-        const cmd = buffer.trim(); buffer = "";
-        term.write("\n");
-        handleCommand(cmd);
-        term.write("\n$ ");
-    } else if (data === "\u007F") {
-        if (buffer.length) {
-            buffer = buffer.slice(0, -1);
-            term.write("\b \b");
-        }
-    } else {
-        buffer += data;
-        term.write(data);
-    }
+  } else {
+    inputBuffer += e;
+    term.write(e);
+  }
 });
-
-async function realPing(host) {
-    const url = host.startsWith("http") ? host : `https://${host}`;
-    const start = performance.now();
-    try {
-        await fetch(url, { mode: "no-cors" });
-        return `Reply from ${host}: time=${Math.round(performance.now() - start)}ms`;
-    } catch {
-        return `Request timed out to ${host}`;
-    }
-}
-
-async function nanoEditor(filename) {
-    term.writeln(`Opening nano: ${filename}`);
-    term.writeln("--- Press CTRL+X to save & exit ---");
-
-    let fileHandle;
-    let existing = "";
-
-    try {
-        fileHandle = await dirHandle.getFileHandle(filename, { create: true });
-        const file = await fileHandle.getFile();
-        existing = await file.text();
-    } catch {}
-
-    let content = existing;
-    term.writeln(content);
-
-    const disposer = term.onData(async key => {
-        if (key === "\u0018") { // CTRL+X
-            disposer.dispose();
-            const writable = await fileHandle.createWritable();
-            await writable.write(content);
-            await writable.close();
-            term.writeln("\nSaved.");
-            term.write("$ ");
-        } else if (key === "\r") {
-            content += "\n";
-            term.write("\n");
-        } else if (key === "\u007F") {
-            content = content.slice(0, -1);
-            term.write("\b \b");
-        } else {
-            content += key;
-            term.write(key);
-        }
-    });
-}
-
-async function handleCommand(cmd) {
-    if (!cmd) return;
-    const [base, ...args] = cmd.split(" ");
-
-    switch (base) {
-        case "nano":
-            if (!args[0]) return term.writeln("Usage: nano <file>");
-            if (!dirHandle) return term.writeln("No folder selected.");
-            nanoEditor(args[0]);
-            break;
-
-        case "help":
-            term.writeln("Commands: help, ls, dir, cd, mkdir, rmdir, del, cls, spec, echo, ping, web, credits, nano, exit");
-            break;
-
-        case "cls": term.clear(); break;
-
-        case "ls":
-        case "dir":
-            if (!dirHandle) return term.writeln("No folder selected.");
-            for await (const entry of dirHandle.values()) term.writeln(entry.name);
-            break;
-
-        case "mkdir":
-            if (!args[0]) return term.writeln("Usage: mkdir <name>");
-            await dirHandle.getDirectoryHandle(args[0], { create: true });
-            term.writeln("Folder created.");
-            break;
-
-        case "rmdir":
-            if (!args[0]) return term.writeln("Usage: rmdir <name>");
-            await dirHandle.removeEntry(args[0], { recursive: true });
-            term.writeln("Folder removed.");
-            break;
-
-        case "del":
-            if (!args[0]) return term.writeln("Usage: del <file>");
-            await dirHandle.removeEntry(args[0]);
-            term.writeln("File deleted.");
-            break;
-
-        case "echo": term.writeln(args.join(" ")); break;
-
-        case "web":
-            if (!args[0]) return term.writeln("Usage: web <url>");
-            window.open(args[0], "_blank");
-            term.writeln("Opened " + args[0]);
-            break;
-
-        case "ping":
-            if (!args[0]) return term.writeln("Usage: ping <host>");
-            term.writeln("Pinging " + args[0] + "...");
-            term.writeln(await realPing(args[0]));
-            break;
-
-        case "spec":
-            term.writeln("Device: iOS WebKit");
-            term.writeln("UserAgent: " + navigator.userAgent);
-            term.writeln("Cores: " + navigator.hardwareConcurrency);
-            break;
-
-        case "credits": term.writeln("Adam T. Nassar"); break;
-        case "exit": term.writeln("Goodbye!"); break;
-
-        default:
-            term.writeln("Unknown command: " + base);
-    }
-}
-
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js");
 </script>
-
 </body>
 </html>
