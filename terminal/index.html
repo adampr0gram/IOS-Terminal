@@ -13,9 +13,6 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <link rel="apple-touch-icon" href="/icons/192.png">
 
-<!-- Fonts -->
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-
 <!-- Xterm -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
 <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
@@ -29,7 +26,7 @@
         height: 100%;
         background: #000000;
         overflow: hidden;
-        font-family: "JetBrains Mono", monospace;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     #terminal {
@@ -37,39 +34,38 @@
         height: 100%;
     }
 
-    /* Popup */
+    /* Permission Popup */
     #permissionPopup {
         position: fixed;
         inset: 0;
-        background: rgba(0, 0, 0, 0.88);
+        background: rgba(0,0,0,0.85);
         display: flex;
         align-items: center;
         justify-content: center;
         z-index: 9999;
     }
     #popupBox {
-        background: #0f0f0f;
-        padding: 20px;
-        width: 280px;
+        background: #0d0d0d;
+        padding: 22px;
         border-radius: 10px;
         border: 1px solid #333;
-        color: #e6e6e6;
+        width: 280px;
         text-align: center;
-        font-family: "JetBrains Mono", monospace;
+        color: #00ff55;
     }
     #chooseFolder {
+        margin-top: 12px;
         width: 100%;
         padding: 10px;
-        margin-top: 10px;
-        border: none;
         border-radius: 6px;
-        background: #007aff;
-        color: white;
+        border: none;
+        background: #00cc44;
+        color: black;
+        font-weight: 600;
         font-size: 16px;
     }
 </style>
 </head>
-
 <body>
 
 <div id="terminal"></div>
@@ -77,46 +73,38 @@
 <div id="permissionPopup">
     <div id="popupBox">
         <h3>Folder Access</h3>
-        <p>Please choose a folder so commands can read/write files.</p>
+        <p>Select a folder so commands can read/write files.</p>
         <button id="chooseFolder">Choose Folder</button>
     </div>
 </div>
 
 <script>
-/* ---------------- Terminal Setup ---------------- */
-
+/* Terminal Initialization */
 const term = new Terminal({
     theme: {
         background: "#000000",
-        foreground: "#e0e0e0",
-        cursor: "#ffffff"
+        foreground: "#00ff55",   // Green text
+        cursor: "#00ff55"
     },
-    fontFamily: "JetBrains Mono, monospace",
-    fontSize: 16,
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    fontSize: 14,                // Smaller font size
     cursorBlink: true,
-    lineHeight: 1.2
+    lineHeight: 1.15
 });
 
 let dirHandle = null;
-let currentPath = "/";
 let buffer = "";
 
-/* Display Terminal */
 term.open(document.getElementById("terminal"));
 term.writeln("iOS Terminal Ready\n");
 term.write("$ ");
 
-/* ---------------- Folder Restore ---------------- */
-
+/* Restore Folder Access */
 (async () => {
     const saved = localStorage.getItem("dir_saved");
-
     if (saved) {
-        try {
-            dirHandle = await window.showDirectoryPicker();
-        } catch {}
+        try { dirHandle = await window.showDirectoryPicker(); } catch {}
     }
-
     if (dirHandle) {
         document.getElementById("permissionPopup").style.display = "none";
         term.writeln("Folder permission restored.");
@@ -126,8 +114,7 @@ term.write("$ ");
     }
 })();
 
-/* ---------------- Folder Picker ---------------- */
-
+/* Folder Picker */
 document.getElementById("chooseFolder").onclick = async () => {
     try {
         dirHandle = await window.showDirectoryPicker();
@@ -142,8 +129,7 @@ document.getElementById("chooseFolder").onclick = async () => {
     }
 };
 
-/* ---------------- Input Handling ---------------- */
-
+/* Input Handling */
 term.onData(data => {
     if (data === "\r") {
         const cmd = buffer.trim();
@@ -152,7 +138,7 @@ term.onData(data => {
         handleCommand(cmd);
         term.write("\n$ ");
     } else if (data === "\u007F") {
-        if (buffer.length > 0) {
+        if (buffer.length) {
             buffer = buffer.slice(0, -1);
             term.write("\b \b");
         }
@@ -162,33 +148,30 @@ term.onData(data => {
     }
 });
 
-/* ---------------- Command Engine ---------------- */
+/* REAL PING */
+async function realPing(host) {
+    const url = host.startsWith("http") ? host : `https://${host}`;
+    const start = performance.now();
+    try {
+        await fetch(url, { mode: "no-cors" });
+        const time = Math.round(performance.now() - start);
+        return `Reply from ${host}: time=${time}ms`;
+    } catch {
+        return `Request timed out to ${host}`;
+    }
+}
 
+/* Command Engine */
 async function handleCommand(cmd) {
     if (!cmd) return;
 
-    const parts = cmd.split(" ");
-    const base = parts[0];
-    const args = parts.slice(1);
+    const [base, ...args] = cmd.split(" ");
 
     switch (base) {
         case "help":
             term.writeln("Commands:");
-            term.writeln(" help           - this help");
-            term.writeln(" ls/dir        - list files");
-            term.writeln(" cd <folder>   - change directory");
-            term.writeln(" mkdir <name>  - create folder");
-            term.writeln(" rmdir <name>  - remove folder");
-            term.writeln(" del <file>    - delete file");
-            term.writeln(" cls           - clear screen");
-            term.writeln(" spec          - device specs");
-            term.writeln(" echo <text>   - print");
-            term.writeln(" ping <host>   - fake ping");
-            term.writeln(" web <url>     - open URL");
-            term.writeln(" credits       - show credits");
-            term.writeln(" run <file>    - run .cipt script");
-            term.writeln(" base64en      - encode file/text");
-            term.writeln(" exit          - exit");
+            term.writeln(" help, ls/dir, cd, mkdir, rmdir, del, cls");
+            term.writeln(" spec, echo, ping, web, credits, run, base64en, exit");
             break;
 
         case "cls":
@@ -204,12 +187,10 @@ async function handleCommand(cmd) {
             break;
 
         case "cd":
-            if (!args[0]) return term.writeln("Usage: cd <folder>");
             term.writeln("(cd is simulated only)");
             break;
 
         case "mkdir":
-            if (!dirHandle) return term.writeln("No folder selected.");
             if (!args[0]) return term.writeln("Usage: mkdir <name>");
             await dirHandle.getDirectoryHandle(args[0], { create: true });
             term.writeln("Folder created.");
@@ -227,12 +208,6 @@ async function handleCommand(cmd) {
             term.writeln("File deleted.");
             break;
 
-        case "ping":
-            term.writeln("Pinging " + args[0] + "...");
-            await new Promise(r => setTimeout(r, 500));
-            term.writeln("Reply from " + args[0] + ": bytes=32 time=32ms");
-            break;
-
         case "echo":
             term.writeln(args.join(" "));
             break;
@@ -241,6 +216,13 @@ async function handleCommand(cmd) {
             if (!args[0]) return term.writeln("Usage: web <url>");
             window.open(args[0], "_blank");
             term.writeln("Opened " + args[0]);
+            break;
+
+        case "ping":
+            if (!args[0]) return term.writeln("Usage: ping <host>");
+            term.writeln("Pinging " + args[0] + "...");
+            const pingReply = await realPing(args[0]);
+            term.writeln(pingReply);
             break;
 
         case "spec":
@@ -254,11 +236,11 @@ async function handleCommand(cmd) {
             break;
 
         case "run":
-            term.writeln("CIPT execution coming soon!");
+            term.writeln("CIPT scripting coming soon!");
             break;
 
         case "base64en":
-            term.writeln("Feature soon: base64 encode file/text");
+            term.writeln("Base64 encoder coming soon!");
             break;
 
         case "exit":
@@ -270,8 +252,7 @@ async function handleCommand(cmd) {
     }
 }
 
-/* ---------------- PWA Service Worker ---------------- */
-
+/* Register Service Worker */
 if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/service-worker.js");
 }
