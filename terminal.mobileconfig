@@ -46,7 +46,7 @@
 
             <!-- Replace with your hosted webapp URL -->
             <key>URL</key>
-            <string>https://example.com/xterm</string>
+            <string>https://ios-terminal.onrender.com/terminal</string>
         </dict>
     </array>
 
