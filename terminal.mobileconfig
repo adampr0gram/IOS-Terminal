@@ -27,7 +27,7 @@
             <string>Creates a WebClip for an xterm-style web app</string>
 
             <key>PayloadDisplayName</key>
-            <string>XTerm WebApp</string>
+            <string>IOS Terminal</string>
 
             <key>PayloadIdentifier</key>
             <string>com.example.xterm.webclip</string>
@@ -51,7 +51,7 @@
     </array>
 
     <key>PayloadDisplayName</key>
-    <string>XTerm WebApp Profile</string>
+    <string>IOS Terminal</string>
 
     <key>PayloadIdentifier</key>
     <string>com.example.xterm.profile</string>
