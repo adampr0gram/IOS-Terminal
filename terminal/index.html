@@ -8,10 +8,13 @@
 
 <link rel="manifest" href="/manifest.json">
 
-<!-- iOS PWA support -->
+<!-- iOS PWA -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <link rel="apple-touch-icon" href="/icons/192.png">
+
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 
 <!-- Xterm -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
@@ -24,42 +27,44 @@
                  env(safe-area-inset-bottom) env(safe-area-inset-left);
         width: 100%;
         height: 100%;
-        font-family: monospace;
-        background: black;
+        background: #000000;
         overflow: hidden;
+        font-family: "JetBrains Mono", monospace;
     }
+
     #terminal {
         width: 100%;
         height: 100%;
     }
 
-    /* Folder Picker Popup */
+    /* Popup */
     #permissionPopup {
         position: fixed;
         inset: 0;
-        background: rgba(0,0,0,0.85);
+        background: rgba(0, 0, 0, 0.88);
         display: flex;
         align-items: center;
         justify-content: center;
         z-index: 9999;
     }
     #popupBox {
-        background: #111;
-        padding: 18px;
-        border-radius: 12px;
-        width: 260px;
-        color: white;
-        text-align: center;
+        background: #0f0f0f;
+        padding: 20px;
+        width: 280px;
+        border-radius: 10px;
         border: 1px solid #333;
+        color: #e6e6e6;
+        text-align: center;
+        font-family: "JetBrains Mono", monospace;
     }
     #chooseFolder {
-        background: #007aff;
-        padding: 10px;
         width: 100%;
+        padding: 10px;
         margin-top: 10px;
-        color: white;
         border: none;
         border-radius: 6px;
+        background: #007aff;
+        color: white;
         font-size: 16px;
     }
 </style>
@@ -72,76 +77,82 @@
 <div id="permissionPopup">
     <div id="popupBox">
         <h3>Folder Access</h3>
-        <p>Select a folder for file commands.</p>
+        <p>Please choose a folder so commands can read/write files.</p>
         <button id="chooseFolder">Choose Folder</button>
     </div>
 </div>
 
 <script>
-//
-// XTERM INIT
-//
+/* ---------------- Terminal Setup ---------------- */
+
 const term = new Terminal({
-    theme: { background: "#000000", foreground: "#ffffff" },
-    cursorBlink: true
+    theme: {
+        background: "#000000",
+        foreground: "#e0e0e0",
+        cursor: "#ffffff"
+    },
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: 16,
+    cursorBlink: true,
+    lineHeight: 1.2
 });
 
 let dirHandle = null;
+let currentPath = "/";
+let buffer = "";
 
+/* Display Terminal */
 term.open(document.getElementById("terminal"));
-term.write("iOS Terminal Ready\n");
+term.writeln("iOS Terminal Ready\n");
+term.write("$ ");
 
-//
-// Try restoring folder permission
-//
+/* ---------------- Folder Restore ---------------- */
+
 (async () => {
     const saved = localStorage.getItem("dir_saved");
 
     if (saved) {
         try {
             dirHandle = await window.showDirectoryPicker();
-        } catch {
-            /* user may have revoked permission */ 
-        }
+        } catch {}
     }
 
     if (dirHandle) {
         document.getElementById("permissionPopup").style.display = "none";
-        term.write("Folder permission restored.\n\n$ ");
+        term.writeln("Folder permission restored.");
+        term.write("$ ");
     } else {
-        term.write("Waiting for folder permission...\n");
+        term.writeln("Waiting for folder permission...");
     }
 })();
 
-//
-// Folder selection button
-//
+/* ---------------- Folder Picker ---------------- */
+
 document.getElementById("chooseFolder").onclick = async () => {
     try {
         dirHandle = await window.showDirectoryPicker();
         await dirHandle.requestPermission({ mode: "readwrite" });
-
         localStorage.setItem("dir_saved", "yes");
-
         document.getElementById("permissionPopup").style.display = "none";
-        term.write("\nFolder selected.\n$ ");
+        term.writeln("\nFolder selected.");
+        term.write("$ ");
     } catch {
-        term.write("\nPermission denied.\n$ ");
+        term.writeln("\nPermission denied.");
+        term.write("$ ");
     }
 };
 
-//
-// Basic Terminal Input
-//
-let buffer = "";
+/* ---------------- Input Handling ---------------- */
 
 term.onData(data => {
     if (data === "\r") {
-        handleCommand(buffer.trim());
+        const cmd = buffer.trim();
         buffer = "";
+        term.write("\n");
+        handleCommand(cmd);
         term.write("\n$ ");
     } else if (data === "\u007F") {
-        if (buffer.length) {
+        if (buffer.length > 0) {
             buffer = buffer.slice(0, -1);
             term.write("\b \b");
         }
@@ -151,15 +162,33 @@ term.onData(data => {
     }
 });
 
-//
-// Command Handler
-//
-async function handleCommand(cmd) {
-    if (cmd === "") return;
+/* ---------------- Command Engine ---------------- */
 
-    switch (cmd) {
+async function handleCommand(cmd) {
+    if (!cmd) return;
+
+    const parts = cmd.split(" ");
+    const base = parts[0];
+    const args = parts.slice(1);
+
+    switch (base) {
         case "help":
-            term.write("Commands: help, ls, dir, cls, echo, exit");
+            term.writeln("Commands:");
+            term.writeln(" help           - this help");
+            term.writeln(" ls/dir        - list files");
+            term.writeln(" cd <folder>   - change directory");
+            term.writeln(" mkdir <name>  - create folder");
+            term.writeln(" rmdir <name>  - remove folder");
+            term.writeln(" del <file>    - delete file");
+            term.writeln(" cls           - clear screen");
+            term.writeln(" spec          - device specs");
+            term.writeln(" echo <text>   - print");
+            term.writeln(" ping <host>   - fake ping");
+            term.writeln(" web <url>     - open URL");
+            term.writeln(" credits       - show credits");
+            term.writeln(" run <file>    - run .cipt script");
+            term.writeln(" base64en      - encode file/text");
+            term.writeln(" exit          - exit");
             break;
 
         case "cls":
@@ -168,28 +197,81 @@ async function handleCommand(cmd) {
 
         case "ls":
         case "dir":
-            if (!dirHandle) return term.write("No folder selected.");
+            if (!dirHandle) return term.writeln("No folder selected.");
             for await (const entry of dirHandle.values()) {
-                term.write("\n" + entry.name);
+                term.writeln(entry.name);
             }
+            break;
+
+        case "cd":
+            if (!args[0]) return term.writeln("Usage: cd <folder>");
+            term.writeln("(cd is simulated only)");
+            break;
+
+        case "mkdir":
+            if (!dirHandle) return term.writeln("No folder selected.");
+            if (!args[0]) return term.writeln("Usage: mkdir <name>");
+            await dirHandle.getDirectoryHandle(args[0], { create: true });
+            term.writeln("Folder created.");
+            break;
+
+        case "rmdir":
+            if (!args[0]) return term.writeln("Usage: rmdir <name>");
+            await dirHandle.removeEntry(args[0], { recursive: true });
+            term.writeln("Folder removed.");
+            break;
+
+        case "del":
+            if (!args[0]) return term.writeln("Usage: del <file>");
+            await dirHandle.removeEntry(args[0]);
+            term.writeln("File deleted.");
+            break;
+
+        case "ping":
+            term.writeln("Pinging " + args[0] + "...");
+            await new Promise(r => setTimeout(r, 500));
+            term.writeln("Reply from " + args[0] + ": bytes=32 time=32ms");
+            break;
+
+        case "echo":
+            term.writeln(args.join(" "));
+            break;
+
+        case "web":
+            if (!args[0]) return term.writeln("Usage: web <url>");
+            window.open(args[0], "_blank");
+            term.writeln("Opened " + args[0]);
+            break;
+
+        case "spec":
+            term.writeln("Device: iOS WebKit");
+            term.writeln("UserAgent: " + navigator.userAgent);
+            term.writeln("Cores: " + navigator.hardwareConcurrency);
+            break;
+
+        case "credits":
+            term.writeln("Adam T. Nassar");
+            break;
+
+        case "run":
+            term.writeln("CIPT execution coming soon!");
+            break;
+
+        case "base64en":
+            term.writeln("Feature soon: base64 encode file/text");
             break;
 
         case "exit":
-            term.write("Goodbye.");
+            term.writeln("Goodbye!");
             break;
 
         default:
-            if (cmd.startsWith("echo ")) {
-                term.write(cmd.substring(5));
-                break;
-            }
-            term.write("Unknown command");
+            term.writeln("Unknown command: " + base);
     }
 }
 
-//
-// Register Service Worker
-//
+/* ---------------- PWA Service Worker ---------------- */
+
 if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/service-worker.js");
 }
