@@ -3,12 +3,15 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>iOS Terminal (File Access)</title>
+<title>iOS Terminal</title>
 
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <link rel="apple-touch-icon" href="/icons/192.png">
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
 
 <style>
 @font-face {
@@ -16,187 +19,203 @@
     src: url("https://cdn.jsdelivr.net/gh/iamadamdev/fonts/Monaco.woff2") format("woff2");
 }
 html, body {
-  height:100%; margin:0; background:#000; font-family: Monaco, monospace;
-  overflow:hidden;
+    margin: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
 }
-#terminal { width:100%; height:100%; }
+#terminal { width: 100%; height: 100%; }
+#permissionPopup {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+}
+#popupBox {
+    background: #0d0d0d;
+    padding: 22px;
+    border-radius: 10px;
+    border: 1px solid #333;
+    width: 280px;
+    text-align: center;
+    color: #fff;
+}
+#chooseFiles {
+    margin-top: 12px;
+    width: 100%; padding: 10px;
+    border-radius: 6px;
+    border: none;
+    background: #fff; color: #000;
+    font-weight: 600; font-size: 16px;
+}
 </style>
-
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css">
-<script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
 </head>
 <body>
 <div id="terminal"></div>
 
+<div id="permissionPopup">
+    <div id="popupBox">
+        <h3>File Access</h3>
+        <p>Select files that commands can read/write.</p>
+        <button id="chooseFiles">Choose Files</button>
+    </div>
+</div>
+
 <script>
-// ---------------- Terminal Setup ----------------
+let files = {};
+let buffer = "";
+let cursorVisible = true;
+
 const term = new Terminal({
-  theme: { background:'#000', foreground:'#fff', cursor:'#fff' },
-  fontFamily: 'Monaco, monospace',
-  fontSize: 14,
-  cursorBlink: true
+    theme: { background: "#000", foreground: "#fff", cursor: "#ffffff" },
+    fontFamily: "Monaco, monospace",
+    fontSize: 14,
+    cursorBlink: true,
+    letterSpacing: 0,
+    lineHeight: 1.2
 });
-term.open(document.getElementById('terminal'));
 
-term.writeln('iOS Terminal — Direct File Access');
-term.writeln('Type "help" for commands.');
+term.open(document.getElementById("terminal"));
 
-let inputBuffer = '';
-let openedFiles = {}; // filename -> FileHandle
+term.writeln("iOS Terminal Ready (File Mode)");
+term.write("$ ");
 
-function prompt(){ term.write("\n> "); }
-prompt();
+setInterval(() => {
+    cursorVisible = !cursorVisible;
+    term.setOption("cursorStyle", cursorVisible ? "block" : "bar");
+}, 500);
 
-// ---------------- File Selection ----------------
-async function pickFiles(multiple){
-  const picker = document.createElement('input');
-  picker.type = 'file';
-  if(multiple) picker.multiple = true;
-
-  return new Promise(res => {
-    picker.onchange = () => res([...picker.files]);
-    picker.click();
-  });
+function pickFiles() {
+    return new Promise(res => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.multiple = true;
+        input.accept = "*/*";
+        input.style.display = "none";
+        document.body.appendChild(input);
+        input.onchange = () => {
+            res([...input.files]);
+            document.body.removeChild(input);
+        };
+        input.click();
+    });
 }
 
-async function openFiles(cmd){
-  const multiple = !cmd.includes('-single');
-  const files = await pickFiles(multiple);
-  files.forEach(f => openedFiles[f.name] = f);
-  return files.length + ' file(s) opened';
+document.getElementById("chooseFiles").onclick = async () => {
+    const picked = await pickFiles();
+    picked.forEach(f => files[f.name] = f);
+    document.getElementById("permissionPopup").style.display = "none";
+    term.writeln("
+Files selected.");
+    term.write("$ ");
+};
+
+async function readFile(name) {
+    if (!files[name]) return "File not loaded";
+    return await files[name].text();
 }
 
-async function readFile(name){
-  const f = openedFiles[name];
-  if(!f) return 'File not opened';
-  return await f.text();
+async function nanoEditor(filename) {
+    term.writeln(`Opening nano: ${filename}`);
+    term.writeln("--- Press CTRL+X to exit ---");
+
+    let existing = await readFile(filename);
+    if (existing === "File not loaded") existing = "";
+
+    let content = existing;
+    term.writeln(content);
+
+    const disposer = term.onData(async key => {
+        if (key === "") { // CTRL+X
+            disposer.dispose();
+            term.writeln("
+Cannot save: iOS browsers cannot overwrite files.");
+            term.write("$ ");
+        } else if (key === "
+") {
+            content += "
+";
+            term.write("
+");
+        } else if (key === "") {
+            content = content.slice(0, -1);
+            term.write(" ");
+        } else {
+            content += key;
+            term.write(key);
+        }
+    });
 }
 
-async function writeFile(name, content){
-  const f = openedFiles[name];
-  if(!f) return 'File not opened';
-  term.writeln('⚠️ iOS Safari does NOT support writing back to chosen files.');
-  term.writeln('Use: export <filename> to download updated version.');
-}
-
-async function exportFile(name, content){
-  const blob = new Blob([content], {type:'text/plain'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-}
-
-// ---------------- Commands ----------------
-async function handle(cmd){
-  const p = cmd.split(' ');
-  const c = p[0];
-  const args = p.slice(1);
-
-  switch(c){
-    case 'help':
-      term.writeln('Commands:');
-      term.writeln(' open        — Pick multiple files');
-      term.writeln(' open -single — Pick only 1 file');
-      term.writeln(' read <file>');
-      term.writeln(' write <file> <text>');
-      term.writeln(' export <file> — download edited file');
-      term.writeln(' nano <file>');
-      term.writeln(' base64en <text>');
-      term.writeln(' ping <host>');
-      term.writeln(' web <url>');
-      term.writeln(' credits');
-      break;
-
-    case 'open':
-      term.writeln(await openFiles(cmd));
-      break;
-
-    case 'read':
-      if(!args[0]) return term.writeln('Usage: read <file>');
-      const r = await readFile(args[0]);
-      term.writeln(r);
-      break;
-
-    case 'write':
-      if(!args[0]) return term.writeln('Usage: write <file> <text>');
-      await writeFile(args[0], args.slice(1).join(' '));
-      break;
-
-    case 'export':
-      if(!args[0]) return term.writeln('Usage: export <file>');
-      const dat = await readFile(args[0]);
-      await exportFile(args[0], dat);
-      term.writeln('Exported');
-      break;
-
-    case 'nano':
-      if(!args[0]) return term.writeln('Usage: nano <file>');
-      await nanoEditor(args[0]);
-      break;
-
-    case 'base64en':
-      term.writeln(btoa(args.join(' ')));
-      break;
-
-    case 'ping':
-      if(!args[0]) return term.writeln('Usage: ping <host>');
-      term.writeln('Pinging...');
-      try{ await fetch('https://' + args[0], {mode:'no-cors'}); term.writeln('Success'); }
-      catch(e){ term.writeln('Timeout'); }
-      break;
-
-    case 'web':
-      window.open(args[0], '_blank');
-      break;
-
-    case 'credits':
-      term.writeln('Adam T. Nassar');
-      break;
-
-    default:
-      term.writeln('Unknown command');
-  }
-}
-
-// ---------------- nano editor ----------------
-async function nanoEditor(file){
-  let content = await readFile(file) || '';
-  term.writeln('--- nano: ' + file + ' (Ctrl+X to save+exit) ---');
-  term.write(content);
-
-  let buf = content;
-  const listener = term.onData(k => {
-    if(k === '\u0018'){ // Ctrl+X
-      listener.dispose();
-      exportFile(file, buf);
-      term.writeln('\nSaved (downloaded)');
-      return;
+term.onData(data => {
+    if (data === "
+") {
+        const cmd = buffer.trim(); buffer = "";
+        term.write("
+");
+        handleCommand(cmd);
+        term.write("
+$ ");
+    } else if (data === "") {
+        if (buffer.length) {
+            buffer = buffer.slice(0, -1);
+            term.write(" ");
+        }
+    } else {
+        buffer += data;
+        term.write(data);
     }
-    if(k === '\u007F'){ buf = buf.slice(0,-1); term.write("\b \b"); return; }
-    if(k === '\r'){ buf += '\n'; term.write('\n'); return; }
-    buf += k; term.write(k);
-  });
-}
-
-// ---------------- Input ----------------
-term.onData(e => {
-  if(e === '\r'){
-    const cmd = inputBuffer.trim();
-    inputBuffer = '';
-    term.write('\n');
-    handle(cmd);
-    prompt();
-  } else if(e === '\u007F'){
-    if(inputBuffer.length>0){
-      inputBuffer = inputBuffer.slice(0,-1);
-      term.write("\b \b");
-    }
-  } else {
-    inputBuffer += e;
-    term.write(e);
-  }
 });
+
+async function handleCommand(cmd) {
+    if (!cmd) return;
+    const [base, ...args] = cmd.split(" ");
+
+    switch (base) {
+        case "cd":
+            if (!args[0]) return term.writeln("Usage: cd <folder>");
+            if (!dirHandle) return term.writeln("No folder selected.");
+            try {
+                dirHandle = await dirHandle.getDirectoryHandle(args[0]);
+                term.writeln("Moved into " + args[0]);
+            } catch {
+                term.writeln("Folder not found.");
+            }
+            break;
+
+        case "nano"::
+            if (!args[0]) return term.writeln("Usage: nano <file>");
+            nanoEditor(args[0]);
+            break;
+
+        case "help":
+            term.writeln("Commands: help, ls, dir, cd, mkdir, rmdir, del, cls, spec, echo, ping, web, credits, nano, exit");
+            break;
+
+        case "cls": term.clear(); break;
+
+        case "ls":
+            Object.keys(files).forEach(n => term.writeln(n));
+            break;
+
+        case "cat":
+            if (!args[0]) return term.writeln("Usage: cat <file>");
+            term.writeln(await readFile(args[0]));
+            break;
+
+        case "echo": term.writeln(args.join(" ")); break;
+
+        case "exit": term.writeln("Goodbye!"); break;
+
+        default:
+            term.writeln("Unknown command: " + base);
+    }
+}
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/service-worker.js");
 </script>
+
 </body>
 </html>
