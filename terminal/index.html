@@ -5,21 +5,23 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>iOS Terminal (xterm.js)</title>
 
-<!-- xterm.js CSS & JS from CDN -->
+<link rel="manifest" href="/manifest.json">
+
+<!-- xterm.js CSS -->
 <link rel="stylesheet" href="https://unpkg.com/xterm/css/xterm.css" />
+
 <style>
   html,body { height:100%; margin:0; background:#000; font-family:system-ui,-apple-system,Segoe UI,Roboto; }
   #topbar { display:flex; gap:8px; padding:10px; background:#0b0b0b; color:#fff; align-items:center; }
   #term-wrap { height: calc(100vh - 64px); }
   #terminal { height:100%; width:100%; }
   button, select { background:#0a84ff; color:white; border: none; padding:8px 10px; border-radius:6px; font-weight:600; }
-  #editorModal { position:fixed; inset:0; display:none; background: rgba(0,0,0,0.75); align-items:center; justify-content:center; }
-  #editorBox { width:90%; max-width:900px; height:70%; background:#111; padding:12px; border-radius:8px; display:flex; flex-direction:column; }
-  #editorArea { flex:1; width:100%; resize:none; font-family:monospace; font-size:14px; color:#0f0; background:#000; border-radius:6px; padding:10px; }
-  #editorButtons { display:flex; gap:8px; margin-top:8px; }
-  .small { padding:6px 8px; font-size:13px; }
   #status { margin-left:auto; color:#ddd; font-size:13px; }
-  #pickerNotice { color:#ffdd57; margin-left:12px; }
+  #pickerNotice { color:#ffdd57; margin-left:12px; display:none; }
+  #editorModal { position:fixed; inset:0; display:none; background: rgba(0,0,0,0.75); align-items:center; justify-content:center; z-index:9999; }
+  #editorBox { width:90%; max-width:900px; height:70%; background:#111; padding:12px; border-radius:8px; display:flex; flex-direction:column; }
+  #editorArea { flex:1; width:100%; resize:none; font-family:monospace; font-size:14px; color:#0f0; background:#000; border-radius:6px; padding:10px; border:none; outline:none; }
+  .small { padding:6px 8px; font-size:13px; }
 </style>
 </head>
 <body>
@@ -33,29 +35,23 @@
   </select>
   <button id="installPwaBtn" class="small" style="display:none;">Install (PWA)</button>
   <div id="status">No folder selected</div>
-  <div id="pickerNotice" style="display:none;">(Persistent only in PWA on some browsers)</div>
+  <div id="pickerNotice">(Persistent only when installed as PWA on iOS)</div>
 </div>
 
 <div id="term-wrap">
   <div id="terminal"></div>
 </div>
 
-<!-- editor modal (nano-like) -->
+<!-- editor modal -->
 <div id="editorModal">
   <div id="editorBox">
     <div style="display:flex; gap:8px; align-items:center;">
       <strong id="editorTitle">Editing</strong>
-      <div id="editorPath" style="color:#ddd; margin-left:8px;"></div>
       <div style="flex:1"></div>
       <button id="editorSave" class="small">Save</button>
       <button id="editorClose" class="small">Close</button>
     </div>
     <textarea id="editorArea" spellcheck="false"></textarea>
-    <div id="editorButtons">
-      <button id="editorInsertDate" class="small">Insert Date</button>
-      <div style="flex:1"></div>
-      <div style="color:#999; font-size:13px; padding:6px;">Use Save to write file. Close discards unsaved edits.</div>
-    </div>
   </div>
 </div>
 
@@ -64,544 +60,469 @@
 <script src="https://unpkg.com/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
 
 <script>
-(async function () {
-  // Globals
-  const { Terminal } = window;
-  const { FitAddon } = window;
-  const fitAddon = new FitAddon.FitAddon();
-  const term = new Terminal({
-    cursorBlink: true,
-    fontFamily: 'Menlo, Monaco, monospace',
-    rows: 30,
-    cols: 80,
-    convertEol: true,
+/*
+  Terminal PWA with persistent Directory Picker handle storage (IndexedDB).
+  - Attempts to restore saved handle on load.
+  - If not available or permission revoked, prompts user to pick folder.
+  - Works best when the site is installed as a PWA (Add to Home Screen on iOS),
+    which allows persistent permission.
+*/
+
+/* ---------- IndexedDB helpers for storing FileSystemHandle ---------- */
+/* We store the handle directly in IndexedDB (FileSystemHandle is structured-cloneable on modern browsers). */
+const DB_NAME = 'ios-terminal-db';
+const STORE_NAME = 'handles';
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
   });
-  term.loadAddon(fitAddon);
+}
+async function idbPut(key, value) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(value, key);
+    tx.oncomplete = () => { db.close(); res(); };
+    tx.onerror = () => { db.close(); rej(tx.error); };
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const r = tx.objectStore(STORE_NAME).get(key);
+    r.onsuccess = () => { db.close(); res(r.result); };
+    r.onerror = () => { db.close(); rej(r.error); };
+  });
+}
+async function idbDelete(key) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).delete(key);
+    tx.oncomplete = () => { db.close(); res(); };
+    tx.onerror = () => { db.close(); rej(tx.error); };
+  });
+}
 
-  const termContainer = document.getElementById('terminal');
-  term.open(termContainer);
-  fitAddon.fit();
+/* ----------------- Terminal & UI setup ----------------- */
+const { Terminal } = window;
+const { FitAddon } = window;
+const fitAddon = new FitAddon.FitAddon();
+const term = new Terminal({ cursorBlink: true, fontFamily: 'Menlo, Monaco, monospace', convertEol: true });
+term.loadAddon(fitAddon);
 
-  // UI refs
-  const pickDirBtn = document.getElementById('pickDirBtn');
-  const statusEl = document.getElementById('status');
-  const themeSelect = document.getElementById('themeSelect');
-  const editorModal = document.getElementById('editorModal');
-  const editorArea = document.getElementById('editorArea');
-  const editorTitle = document.getElementById('editorTitle');
-  const editorPath = document.getElementById('editorPath');
-  const editorSave = document.getElementById('editorSave');
-  const editorClose = document.getElementById('editorClose');
-  const editorInsertDate = document.getElementById('editorInsertDate');
-  const pickerNotice = document.getElementById('pickerNotice');
+const termContainer = document.getElementById('terminal');
+term.open(termContainer);
+fitAddon.fit();
 
-  // Terminal state
-  let rootHandle = null;
-  let cwd = []; // path relative to root as array
-  let cwdHandle = null;
+const pickDirBtn = document.getElementById('pickDirBtn');
+const statusEl = document.getElementById('status');
+const themeSelect = document.getElementById('themeSelect');
+const editorModal = document.getElementById('editorModal');
+const editorArea = document.getElementById('editorArea');
+const editorTitle = document.getElementById('editorTitle');
+const editorSave = document.getElementById('editorSave');
+const editorClose = document.getElementById('editorClose');
+const pickerNotice = document.getElementById('pickerNotice');
+const installPwaBtn = document.getElementById('installPwaBtn');
 
-  // .cipt script storage for functions/variables
-  // functions: { name: [lines] }
-  let ciptFunctions = {};
-  let ciptVars = {};
+/* Terminal state */
+let rootHandle = null;
+let cwd = []; // path array
+let cwdHandle = null;
+let commandBuffer = '';
+let currentEditHandle = null;
 
-  // Utilities: path -> string
-  function pathToString(p) { return (p.length === 0) ? '/' : '/' + p.join('/'); }
+/* CIPT runtime storage */
+let ciptFunctions = {};
+let ciptVars = {};
 
-  // Print helpers
-  function printLine(s='') { term.writeln(s); }
-  function prompt() { term.write('\r\n' + pathToString(cwd) + '> '); }
-  function errLine(s) { term.writeln('Error: ' + s); }
+/* THEMES */
+const THEMES = {
+  linux: { background: '#000000', foreground: '#00ff00', cursor: '#00ff00' },
+  macos: { background: '#0b0b0b', foreground: '#d0d0d0', cursor: '#0a84ff' },
+  windows: { background: '#000080', foreground: '#ffffff', cursor: '#ffffff' }
+};
+function applyTheme(name) { term.setOption('theme', THEMES[name] || THEMES.linux); document.body.style.background = THEMES[name]?.background || '#000'; }
+themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
+applyTheme('linux');
 
-  // Resize handling
-  window.addEventListener('resize', () => setTimeout(()=>fitAddon.fit(), 50));
+/* ---------- FS API detection ---------- */
+function fsApiAvailable() { return 'showDirectoryPicker' in window; }
+if (!fsApiAvailable()) {
+  term.writeln('Warning: Directory Picker not available in this browser.');
+  term.writeln('You need a browser with window.showDirectoryPicker (modern Safari/Chrome).');
+}
 
-  // Theme configurations
-  const THEMES = {
-    linux: { background: '#000000', foreground: '#00ff00', cursor: '#00ff00' },
-    macos: { background: '#0b0b0b', foreground: '#d0d0d0', cursor: '#0a84ff' },
-    windows: { background: '#000080', foreground: '#ffffff', cursor: '#ffffff' }
-  };
-  function applyTheme(name) {
-    const t = THEMES[name] || THEMES.linux;
-    term.setOption('theme', t);
-    document.body.style.background = t.background;
+/* ---------- Persistent handle management ---------- */
+const HANDLE_KEY = 'rootHandle';
+
+async function saveHandle(handle) {
+  try {
+    await idbPut(HANDLE_KEY, handle);
+  } catch (e) {
+    console.warn('Saving handle failed:', e);
   }
-  themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
-  applyTheme('linux');
-
-  // Detect File System Access API availability
-  function fsApiAvailable() {
-    return 'showDirectoryPicker' in window;
+}
+async function loadHandle() {
+  try {
+    return await idbGet(HANDLE_KEY);
+  } catch (e) {
+    console.warn('Loading handle failed:', e);
+    return null;
   }
-  if (!fsApiAvailable()) {
-    printLine('Warning: Directory Picker (File System Access API) not available in this browser.');
-    printLine('This app needs a browser with window.showDirectoryPicker (modern Safari / Chrome).');
-  }
+}
+async function clearSavedHandle() {
+  try { await idbDelete(HANDLE_KEY); } catch (e) { console.warn(e); }
+}
 
-  // Directory Picker
-  async function pickDirectory() {
-    try {
-      rootHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+/* Attempt to restore saved handle and permission */
+async function tryRestoreHandle() {
+  const saved = await loadHandle();
+  if (!saved) return false;
+  // ensure the handle still has permissions
+  try {
+    const perm = await saved.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      rootHandle = saved;
       cwd = [];
       cwdHandle = rootHandle;
       statusEl.textContent = 'Folder: ' + (rootHandle.name || 'selected');
       pickerNotice.style.display = 'inline';
-      printLine('Folder access granted: ' + (rootHandle.name || 'selected'));
+      term.writeln('Restored folder access automatically.');
       prompt();
-    } catch (e) {
-      errLine('Folder pick cancelled or failed.');
-    }
-  }
-  pickDirBtn.addEventListener('click', () => pickDirectory());
-
-  // Helper: walk path array from rootHandle to target dir handle (create=false)
-  async function resolveDirHandle(pathArr, create=false) {
-    let handle = rootHandle;
-    for (let p of pathArr) {
-      if (!handle) throw new Error('No root selected');
-      handle = await handle.getDirectoryHandle(p, { create });
-    }
-    return handle;
-  }
-
-  // Helper: get file handle in cwd
-  async function getFileHandleInCwd(name, options={create:false}) {
-    if (!cwdHandle) throw new Error('No folder selected. Use Choose Folder.');
-    return await cwdHandle.getFileHandle(name, options);
-  }
-
-  // List directory
-  async function listCwd() {
-    if (!cwdHandle) { errLine('No folder selected'); return; }
-    printLine('Listing: ' + pathToString(cwd));
-    for await (const entry of cwdHandle.values()) {
-      printLine(`${entry.kind.toUpperCase()}  ${entry.name}`);
-    }
-  }
-
-  // Change directory
-  async function cmdCd(arg) {
-    if (!arg || arg === '/') {
-      cwd = []; cwdHandle = rootHandle; return;
-    }
-    if (arg === '..') {
-      if (cwd.length > 0) {
-        cwd.pop();
-        cwdHandle = await resolveDirHandle(cwd);
+      return true;
+    } else if (perm === 'prompt') {
+      // try to request permission (this will prompt the user; only do this after user gesture in some browsers)
+      const req = await saved.requestPermission({ mode: 'readwrite' });
+      if (req === 'granted') {
+        rootHandle = saved;
+        cwd = [];
+        cwdHandle = rootHandle;
+        statusEl.textContent = 'Folder: ' + (rootHandle.name || 'selected');
+        pickerNotice.style.display = 'inline';
+        term.writeln('Restored folder access after request.');
+        prompt();
+        return true;
       }
-      return;
     }
-    // support relative folder names only for simplicity
-    // check entry
-    try {
-      const newHandle = await cwdHandle.getDirectoryHandle(arg, { create:false });
-      cwd.push(arg);
-      cwdHandle = newHandle;
-    } catch (e) {
-      errLine('Directory not found: ' + arg);
-    }
+  } catch (e) {
+    console.warn('Restore handle error:', e);
   }
+  // if not granted, clear saved handle to avoid future futile attempts
+  await clearSavedHandle();
+  return false;
+}
 
-  // mkdir
-  async function cmdMkdir(name) {
-    if (!name) { errLine('Usage: mkdir <name>'); return; }
-    await cwdHandle.getDirectoryHandle(name, { create:true });
-    printLine('Created folder: ' + name);
+/* ---------- Directory Picker ---------- */
+async function pickDirectoryInteractive() {
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    rootHandle = handle;
+    cwd = [];
+    cwdHandle = rootHandle;
+    statusEl.textContent = 'Folder: ' + (rootHandle.name || 'selected');
+    pickerNotice.style.display = 'inline';
+    await saveHandle(rootHandle);
+    term.writeln('Folder access granted and saved for future launches.');
+    prompt();
+  } catch (e) {
+    term.writeln('Folder pick cancelled or failed.');
   }
+}
+pickDirBtn.addEventListener('click', () => pickDirectoryInteractive());
 
-  // del file
-  async function cmdDel(name) {
-    if (!name) { errLine('Usage: del <file>'); return; }
-    try {
-      await cwdHandle.removeEntry(name, { recursive:false });
-      printLine('Deleted: ' + name);
-    } catch (e) {
-      errLine('Delete failed: ' + e.message);
-    }
+/* ---------- Path helpers ---------- */
+function pathToString(p) { return (p.length === 0) ? '/' : '/' + p.join('/'); }
+async function resolveDirHandle(pathArr, create=false) {
+  let handle = rootHandle;
+  for (let part of pathArr) {
+    handle = await handle.getDirectoryHandle(part, { create });
   }
+  return handle;
+}
 
-  // rmdir (recursive)
-  async function cmdRmdir(name) {
-    if (!name) { errLine('Usage: rmdir <dir>'); return; }
-    try {
-      await cwdHandle.removeEntry(name, { recursive:true });
-      printLine('Removed directory: ' + name);
-    } catch (e) {
-      errLine('rmdir failed: ' + e.message);
-    }
+/* ---------- Commands: filesystem operations ---------- */
+async function listCwd() {
+  if (!cwdHandle) { term.writeln('No folder selected.'); return; }
+  term.writeln('Listing: ' + pathToString(cwd));
+  for await (const entry of cwdHandle.values()) {
+    term.writeln(`${entry.kind.toUpperCase()}  ${entry.name}`);
   }
-
-  // read file
-  async function cmdRead(name) {
-    if (!name) { errLine('Usage: read <file>'); return; }
-    try {
-      const fh = await cwdHandle.getFileHandle(name, { create:false });
-      const file = await fh.getFile();
-      const txt = await file.text();
-      printLine('--- ' + name + ' ---');
-      txt.split('\n').forEach(l => printLine(l));
-      printLine('--- end ---');
-    } catch (e) {
-      errLine('Read failed: ' + e.message);
-    }
-  }
-
-  // nano-like editor: open and edit file in modal, write back on Save
-  let currentEditHandle = null;
-  async function cmdNano(name) {
-    if (!name) { errLine('Usage: nano <file>'); return; }
-    try {
-      const fh = await cwdHandle.getFileHandle(name, { create:true });
-      currentEditHandle = fh;
-      const file = await fh.getFile();
-      let text = '';
-      try { text = await file.text(); } catch(e) { text = ''; }
-      editorArea.value = text;
-      editorTitle.textContent = 'Editing: ' + name;
-      editorPath.textContent = pathToString(cwd) + '/' + name;
-      editorModal.style.display = 'flex';
-      editorArea.focus();
-    } catch (e) {
-      errLine('Editor open failed: ' + e.message);
-    }
-  }
-
-  editorSave.addEventListener('click', async () => {
-    if (!currentEditHandle) return;
+}
+async function cmdCd(arg) {
+  if (!arg || arg === '/') { cwd = []; cwdHandle = rootHandle; return; }
+  if (arg === '..') { if (cwd.length>0) { cwd.pop(); cwdHandle = await resolveDirHandle(cwd); } return; }
+  try {
+    const newHandle = await cwdHandle.getDirectoryHandle(arg, { create:false });
+    cwd.push(arg);
+    cwdHandle = newHandle;
+  } catch (e) { term.writeln('Directory not found: ' + arg); }
+}
+async function cmdMkdir(name) {
+  if (!name) { term.writeln('Usage: mkdir <name>'); return; }
+  await cwdHandle.getDirectoryHandle(name, { create:true });
+  term.writeln('Created folder: ' + name);
+}
+async function cmdDel(name) {
+  if (!name) { term.writeln('Usage: del <file>'); return; }
+  try { await cwdHandle.removeEntry(name, { recursive:false }); term.writeln('Deleted: ' + name); }
+  catch (e) { term.writeln('Delete failed: ' + e.message); }
+}
+async function cmdRmdir(name) {
+  if (!name) { term.writeln('Usage: rmdir <dir>'); return; }
+  try { await cwdHandle.removeEntry(name, { recursive:true }); term.writeln('Removed directory: ' + name); }
+  catch (e) { term.writeln('rmdir failed: ' + e.message); }
+}
+async function cmdRead(name) {
+  if (!name) { term.writeln('Usage: read <file>'); return; }
+  try {
+    const fh = await cwdHandle.getFileHandle(name, { create:false });
+    const file = await fh.getFile();
+    const txt = await file.text();
+    term.writeln('--- ' + name + ' ---');
+    txt.split('\n').forEach(l => term.writeln(l));
+    term.writeln('--- end ---');
+  } catch (e) { term.writeln('Read failed: ' + e.message); }
+}
+async function cmdNano(name) {
+  if (!name) { term.writeln('Usage: nano <file>'); return; }
+  try {
+    const fh = await cwdHandle.getFileHandle(name, { create:true });
+    currentEditHandle = fh;
+    const file = await fh.getFile();
+    let text = '';
+    try { text = await file.text(); } catch(e){ text=''; }
+    editorArea.value = text;
+    editorTitle.textContent = 'Editing: ' + name;
+    editorModal.style.display = 'flex';
+    editorArea.focus();
+  } catch (e) { term.writeln('Editor open failed: ' + e.message); }
+}
+editorSave.addEventListener('click', async () => {
+  if (!currentEditHandle) return;
+  try {
     const writable = await currentEditHandle.createWritable();
     await writable.write(editorArea.value);
     await writable.close();
-    printLine('File saved: ' + currentEditHandle.name);
-    editorModal.style.display = 'none';
-    currentEditHandle = null;
-    prompt();
-  });
-
-  editorClose.addEventListener('click', () => {
+    term.writeln('File saved: ' + currentEditHandle.name);
     currentEditHandle = null;
     editorModal.style.display = 'none';
-    printLine('Editor closed.');
     prompt();
-  });
+  } catch (e) { term.writeln('Save failed: ' + e.message); }
+});
+editorClose.addEventListener('click', () => { currentEditHandle=null; editorModal.style.display='none'; term.writeln('Editor closed.'); prompt(); });
 
-  editorInsertDate.addEventListener('click', () => {
-    const d = new Date().toString();
-    editorArea.setRangeText(d, editorArea.selectionStart, editorArea.selectionEnd, 'end');
-    editorArea.focus();
-  });
-
-  // write file (echo > file)
-  async function cmdWrite(name, content) {
-    if (!name) { errLine('Usage: write <file> <text>'); return; }
+async function cmdWrite(name, content) {
+  if (!name) { term.writeln('Usage: write <file> <text>'); return; }
+  try {
+    const fh = await cwdHandle.getFileHandle(name, { create:true });
+    const w = await fh.createWritable();
+    await w.write(content);
+    await w.close();
+    term.writeln('Wrote file: ' + name);
+  } catch (e) { term.writeln('Write failed: ' + e.message); }
+}
+async function cmdRun(name) {
+  if (!name) { term.writeln('Usage: run <script.cipt>'); return; }
+  try {
+    const fh = await cwdHandle.getFileHandle(name, { create:false });
+    const file = await fh.getFile();
+    const txt = await file.text();
+    await executeCipt(txt);
+  } catch (e) { term.writeln('Run failed: ' + e.message); }
+}
+async function cmdBase64en(arg) {
+  if (!arg) { term.writeln('Usage: base64en <text|@file>'); return; }
+  if (arg.startsWith('@')) {
+    const filename = arg.slice(1);
     try {
-      const fh = await cwdHandle.getFileHandle(name, { create:true });
-      const w = await fh.createWritable();
-      await w.write(content);
-      await w.close();
-      printLine('Wrote file: ' + name);
-    } catch (e) {
-      errLine('Write failed: ' + e.message);
-    }
-  }
-
-  // run .cipt script
-  async function cmdRun(name) {
-    if (!name) { errLine('Usage: run <script.cipt>'); return; }
-    try {
-      const fh = await cwdHandle.getFileHandle(name, { create:false });
+      const fh = await cwdHandle.getFileHandle(filename, { create:false });
       const file = await fh.getFile();
-      const txt = await file.text();
-      await executeCipt(txt);
-    } catch (e) {
-      errLine('Run failed: ' + e.message);
-    }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i=0;i<bytes.length;i+=chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunkSize));
+      }
+      term.writeln(btoa(binary));
+    } catch (e) { term.writeln('File base64 failed: ' + e.message); }
+  } else {
+    try { term.writeln(btoa(arg)); } catch (e) { term.writeln('Base64 failed: ' + e.message); }
   }
+}
 
-  // base64 encode text or file
-  async function cmdBase64en(arg) {
-    if (!arg) { errLine('Usage: base64en <text|@file>'); return; }
-    if (arg.startsWith('@')) {
-      const filename = arg.slice(1);
-      try {
-        const fh = await cwdHandle.getFileHandle(filename, { create:false });
-        const file = await fh.getFile();
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        // btoa requires binary string; create chunked conversion
-        let binary = '';
-        const chunkSize = 0x8000;
-        for (let i=0;i<bytes.length;i+=chunkSize) {
-          binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunkSize));
-        }
-        const encoded = btoa(binary);
-        printLine(encoded);
-      } catch (e) {
-        errLine('File base64 failed: ' + e.message);
-      }
-    } else {
-      try {
-        printLine(btoa(arg));
-      } catch (e) {
-        errLine('Base64 failed: ' + e.message);
-      }
-    }
-  }
-
-  // .cipt execution engine (very lightweight)
-  // - Support variable set: set var=value
-  // - Support func/ endfunc blocks:
-  //    func fname
-  //      ... lines ...
-  //    endfunc
-  // - Support calling functions by name as a line: call fname
-  // - Lines are parsed and passed to runCommand
-  async function executeCipt(text) {
-    const lines = text.split(/\r?\n/);
-    // parse into main lines, record functions
-    let i = 0;
-    ciptFunctions = ciptFunctions || {};
-    ciptVars = ciptVars || {};
-    const mainLines = [];
-    while (i < lines.length) {
-      const raw = lines[i].trim();
-      if (raw.startsWith('func ')) {
-        const fname = raw.slice(5).trim();
-        const body = [];
-        i++;
-        while (i < lines.length && lines[i].trim() !== 'endfunc') {
-          body.push(lines[i]);
-          i++;
-        }
-        ciptFunctions[fname] = body.slice();
-      } else {
-        mainLines.push(lines[i]);
-      }
+/* ---------- CIPT engine (variables & functions) ---------- */
+async function executeCipt(text) {
+  const lines = text.split(/\r?\n/);
+  let i=0;
+  const mainLines = [];
+  while (i<lines.length) {
+    const raw = lines[i].trim();
+    if (raw.startsWith('func ')) {
+      const fname = raw.slice(5).trim();
+      const body = [];
       i++;
-    }
-
-    // execute main lines sequentially
-    for (const line of mainLines) {
-      const l = line.trim();
-      if (!l) continue;
-      // set var=value
-      if (l.startsWith('set ')) {
-        const rest = l.slice(4);
-        const eq = rest.indexOf('=');
-        if (eq >= 0) {
-          const key = rest.slice(0, eq).trim();
-          const val = rest.slice(eq+1).trim();
-          ciptVars[key] = val;
-          printLine(`Set ${key}=${val}`);
-        } else {
-          errLine('Invalid set syntax');
-        }
-        continue;
+      while (i < lines.length && lines[i].trim() !== 'endfunc') {
+        body.push(lines[i]);
+        i++;
       }
-      if (l.startsWith('call ')) {
-        const fn = l.slice(5).trim();
-        if (ciptFunctions[fn]) {
-          for (const ln of ciptFunctions[fn]) {
-            await dispatchCommandLine(ln);
-          }
-        } else {
-          errLine('Function not found: ' + fn);
-        }
-        continue;
-      }
-      // variable substitution ${var}
-      let substituted = l.replace(/\$\{([A-Za-z0-9_]+)\}/g, (m, p1) => ciptVars[p1] ?? '');
-      await dispatchCommandLine(substituted);
-    }
-  }
-
-  // command dispatcher - accepts already-trimmed string
-  async function dispatchCommandLine(line) {
-    if (!line) return;
-    // show the command in terminal
-    printLine(line);
-    const parts = shellSplit(line);
-    if (parts.length === 0) return;
-
-    const cmd = parts[0].toLowerCase();
-    const args = parts.slice(1);
-
-    try {
-      switch (cmd) {
-        case 'dir':
-        case 'ls':
-          await listCwd(); break;
-        case 'cd':
-          await cmdCd(args[0]); break;
-        case 'mkdir':
-          await cmdMkdir(args[0]); break;
-        case 'del':
-          await cmdDel(args[0]); break;
-        case 'rmdir':
-          await cmdRmdir(args[0]); break;
-        case 'read':
-          await cmdRead(args[0]); break;
-        case 'nano':
-          await cmdNano(args[0]); break;
-        case 'write':
-          // write filename text...
-          await cmdWrite(args[0], args.slice(1).join(' ')); break;
-        case 'run':
-          await cmdRun(args[0]); break;
-        case 'base64en':
-          await cmdBase64en(args[0]); break;
-        case 'ping':
-          printLine('Pinging ' + (args[0]||'localhost') + ' ...');
-          await new Promise(r=>setTimeout(r,600));
-          printLine('Reply from ' + (args[0]||'localhost')); break;
-        case 'echo':
-          printLine(args.join(' ')); break;
-        case 'cls':
-          term.clear(); break;
-        case 'help':
-          printHelp(); break;
-        case 'spec':
-          printSpec(); break;
-        case 'web':
-          if (args[0]) window.open(args[0], '_blank'); else errLine('Usage: web <url>');
-          break;
-        case 'credits':
-          printLine('Created by Adam T. Nassar'); break;
-        case 'exit':
-          printLine('Exit: closing session');
-          // can't close window reliably
-          break;
-        case 'theme':
-          if (args[0]) { applyTheme(args[0]); themeSelect.value = args[0] || 'linux'; }
-          break;
-        default:
-          errLine('Unknown command: ' + cmd);
-      }
-    } catch (e) {
-      errLine(e.message || String(e));
-    }
-  }
-
-  // very simple shell split that respects quotes
-  function shellSplit(s) {
-    const out = [];
-    let cur = '';
-    let inQuote = false;
-    let quoteChar = '';
-    for (let i=0;i<s.length;i++) {
-      const ch = s[i];
-      if (!inQuote && (ch === '"' || ch === "'")) {
-        inQuote = true; quoteChar = ch; continue;
-      }
-      if (inQuote && ch === quoteChar) { inQuote=false; quoteChar=''; continue; }
-      if (!inQuote && ch === ' ') { if (cur) { out.push(cur); cur=''; } continue; }
-      cur += ch;
-    }
-    if (cur) out.push(cur);
-    return out;
-  }
-
-  // print help
-  function printHelp() {
-    printLine('Commands:');
-    printLine('dir, ls            - list folder');
-    printLine('cd <dir>           - change directory');
-    printLine('mkdir <name>       - create folder');
-    printLine('del <file>         - delete file');
-    printLine('rmdir <dir>        - delete folder recursively');
-    printLine('read <file>        - print file contents');
-    printLine('nano <file>        - open editor to edit file');
-    printLine('write <file> <txt> - write text to file (overwrites)');
-    printLine('run <file>         - run .cipt script');
-    printLine('base64en <text|@file> - base64 encode text or @filename');
-    printLine('ping <host>        - ping simulator');
-    printLine('echo <text>        - print text');
-    printLine('cls                - clear screen');
-    printLine('spec               - device specs');
-    printLine('web <url>          - open url in default browser');
-    printLine('theme <linux|macos|windows> - switch theme');
-    printLine('help               - show this help');
-    printLine('credits            - show creator');
-    printLine('');
-    printLine('CIPT: in scripts you can use:');
-    printLine('  func NAME ... endfunc   - define function');
-    printLine('  call NAME               - call function');
-    printLine('  set VAR=value           - set variable');
-    printLine('  ${VAR}                 - substitution in commands');
-  }
-
-  // print spec
-  function printSpec() {
-    printLine('User Agent: ' + navigator.userAgent);
-    printLine('Screen: ' + window.innerWidth + 'x' + window.innerHeight);
-    printLine('Platform: ' + navigator.platform);
-  }
-
-  // initial greeting and input handling via xterm
-  printLine('iOS Terminal — xterm.js');
-  printLine('Use "Choose Folder" to grant access to a folder (Files app).');
-  printLine('Type "help" after selecting folder.');
-  prompt();
-
-  // xterm input -- basic line reader
-  let commandBuffer = '';
-  term.onData(e => {
-    // support backspace, CR
-    if (e === '\u0003') { // ctrl-C
-      commandBuffer = '';
-      term.write('^C');
-      prompt();
-      return;
-    }
-    if (e === '\r') {
-      // Enter
-      const line = commandBuffer.trim();
-      commandBuffer = '';
-      (async ()=> {
-        if (!rootHandle) {
-          errLine('No folder selected. Press Choose Folder.');
-          prompt();
-          return;
-        }
-        await dispatchCommandLine(line);
-        prompt();
-      })();
-      return;
-    }
-    if (e === '\u007f') { // backspace
-      if (commandBuffer.length > 0) {
-        commandBuffer = commandBuffer.slice(0,-1);
-        term.write('\b \b');
-      }
-      return;
-    }
-    // normal char
-    commandBuffer += e;
-    term.write(e);
-  });
-
-  // Make xterm fit initially
-  setTimeout(()=>fitAddon.fit(), 100);
-
-  // handle PWA install prompt hooks (optional)
-  let deferredPrompt;
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    deferredPrompt = e;
-    document.getElementById('installPwaBtn').style.display = 'inline-block';
-  });
-
-  document.getElementById('installPwaBtn').addEventListener('click', async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    const choice = await deferredPrompt.userChoice;
-    if (choice.outcome === 'accepted') {
-      printLine('PWA installed (or user accepted).');
+      ciptFunctions[fname] = body.slice();
     } else {
-      printLine('PWA install declined.');
+      mainLines.push(lines[i]);
     }
-  });
+    i++;
+  }
+  for (const line of mainLines) {
+    const l = line.trim();
+    if (!l) continue;
+    if (l.startsWith('set ')) {
+      const rest = l.slice(4);
+      const eq = rest.indexOf('=');
+      if (eq >= 0) { const key = rest.slice(0,eq).trim(); const val = rest.slice(eq+1).trim(); ciptVars[key]=val; term.writeln(`Set ${key}=${val}`); }
+      else term.writeln('Invalid set syntax');
+      continue;
+    }
+    if (l.startsWith('call ')) {
+      const fn = l.slice(5).trim();
+      if (ciptFunctions[fn]) {
+        for (const ln of ciptFunctions[fn]) await dispatchCommandLine(ln);
+      } else term.writeln('Function not found: ' + fn);
+      continue;
+    }
+    let substituted = l.replace(/\$\{([A-Za-z0-9_]+)\}/g, (m,p1)=> ciptVars[p1] ?? '');
+    await dispatchCommandLine(substituted);
+  }
+}
 
-})();
+/* ---------- Dispatcher ---------- */
+async function dispatchCommandLine(line) {
+  if (!line) return;
+  term.writeln('$ ' + line);
+  const parts = shellSplit(line);
+  if (parts.length===0) return;
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1);
+  switch (cmd) {
+    case 'dir': case 'ls': await listCwd(); break;
+    case 'cd': await cmdCd(args[0]); break;
+    case 'mkdir': await cmdMkdir(args[0]); break;
+    case 'del': await cmdDel(args[0]); break;
+    case 'rmdir': await cmdRmdir(args[0]); break;
+    case 'read': await cmdRead(args[0]); break;
+    case 'nano': await cmdNano(args[0]); break;
+    case 'write': await cmdWrite(args[0], args.slice(1).join(' ')); break;
+    case 'run': await cmdRun(args[0]); break;
+    case 'base64en': await cmdBase64en(args[0]); break;
+    case 'ping': term.writeln('Pinging ' + (args[0]||'localhost') + ' ...'); await new Promise(r=>setTimeout(r,600)); term.writeln('Reply from ' + (args[0]||'localhost')); break;
+    case 'echo': term.writeln(args.join(' ')); break;
+    case 'cls': term.clear(); break;
+    case 'help': printHelp(); break;
+    case 'spec': printSpec(); break;
+    case 'web': if (args[0]) window.open(args[0], '_blank'); else term.writeln('Usage: web <url>'); break;
+    case 'credits': term.writeln('Created by Adam T. Nassar'); break;
+    case 'exit': term.writeln('Exit'); break;
+    case 'theme': if (args[0]) applyTheme(args[0]); break;
+    default: term.writeln('Unknown command: ' + cmd);
+  }
+}
+
+/* ---------- Utilities ---------- */
+function shellSplit(s) {
+  const out=[]; let cur=''; let inQuote=false; let quoteChar='';
+  for (let i=0;i<s.length;i++) {
+    const ch=s[i];
+    if (!inQuote && (ch === '"' || ch === "'")) { inQuote=true; quoteChar=ch; continue; }
+    if (inQuote && ch === quoteChar) { inQuote=false; quoteChar=''; continue; }
+    if (!inQuote && ch === ' ') { if (cur) { out.push(cur); cur=''; } continue; }
+    cur += ch;
+  }
+  if (cur) out.push(cur); return out;
+}
+function printHelp() {
+  term.writeln('Commands:');
+  term.writeln('dir, ls            - list folder');
+  term.writeln('cd <dir>           - change directory');
+  term.writeln('mkdir <name>       - create folder');
+  term.writeln('del <file>         - delete file');
+  term.writeln('rmdir <dir>        - delete folder recursively');
+  term.writeln('read <file>        - print file contents');
+  term.writeln('nano <file>        - open editor to edit file');
+  term.writeln('write <file> <txt> - write text to file (overwrites)');
+  term.writeln('run <file>         - run .cipt script');
+  term.writeln('base64en <text|@file> - base64 encode text or @filename');
+  term.writeln('ping <host>        - ping simulator');
+  term.writeln('echo <text>        - print text');
+  term.writeln('cls                - clear screen');
+  term.writeln('spec               - device specs');
+  term.writeln('web <url>          - open url in default browser');
+  term.writeln('theme <linux|macos|windows> - switch theme');
+  term.writeln('help               - show this help');
+  term.writeln('credits            - show creator');
+}
+function printSpec() {
+  term.writeln('User Agent: ' + navigator.userAgent);
+  term.writeln('Screen: ' + window.innerWidth + 'x' + window.innerHeight);
+  term.writeln('Platform: ' + navigator.platform);
+}
+
+/* ---------- xterm input handling ---------- */
+term.writeln('iOS Terminal — xterm.js');
+term.writeln('If installed as a PWA, this app will remember folder access after you pick a directory.');
+term.writeln('Press Choose Folder to grant access, then type "help".');
+
+prompt();
+
+term.onData(async e => {
+  // ctrl+C
+  if (e === '\u0003') { commandBuffer=''; term.write('^C'); prompt(); return; }
+  if (e === '\r') {
+    const line = commandBuffer.trim();
+    commandBuffer = '';
+    if (!rootHandle) { term.writeln('No folder selected. Press Choose Folder.'); prompt(); return; }
+    await dispatchCommandLine(line);
+    prompt();
+    return;
+  }
+  if (e === '\u007f') { if (commandBuffer.length>0) { commandBuffer = commandBuffer.slice(0,-1); term.write('\b \b'); } return; }
+  commandBuffer += e;
+  term.write(e);
+});
+
+/* ---------- Restore flow on load ---------- */
+window.addEventListener('load', async () => {
+  // Attempt to restore saved handle (works in browsers that allow storing handles)
+  try {
+    const ok = await tryRestoreHandle();
+    if (!ok) term.writeln('No saved folder or permission not granted.');
+  } catch(e) { console.warn('Restore check failed', e); }
+});
+
+/* ---------- PWA install prompt handler ---------- */
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installPwaBtn.style.display = 'inline-block';
+});
+installPwaBtn.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  const choice = await deferredPrompt.userChoice;
+  if (choice.outcome === 'accepted') term.writeln('PWA install accepted.');
+  else term.writeln('PWA install declined.');
+});
+
+/* ---------- helpers ---------- */
+function prompt() { term.write('\r\n' + pathToString(cwd) + '> '); }
+window.addEventListener('resize', () => setTimeout(()=>fitAddon.fit(), 100));
 </script>
 
 </body>
