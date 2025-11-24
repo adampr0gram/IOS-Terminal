@@ -17,7 +17,10 @@
 @font-face {
     font-family: "Monaco";
     src: url("https://cdn.jsdelivr.net/gh/iamadamdev/fonts/Monaco.woff2") format("woff2");
+    font-weight: normal;
+    font-style: normal;
 }
+
 html, body {
     margin: 0;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -26,7 +29,9 @@ html, body {
     background: #000;
     overflow: hidden;
 }
+
 #terminal { width: 100%; height: 100%; }
+
 #permissionPopup {
     position: fixed; inset: 0;
     background: rgba(0,0,0,0.85);
@@ -41,32 +46,41 @@ html, body {
     width: 280px;
     text-align: center;
     color: #fff;
+    font-family: Arial, sans-serif;
 }
-#chooseFiles {
+#chooseFolder {
     margin-top: 12px;
     width: 100%; padding: 10px;
     border-radius: 6px;
     border: none;
     background: #fff; color: #000;
     font-weight: 600; font-size: 16px;
+    font-family: Arial, sans-serif;
 }
 </style>
 </head>
 <body>
+
 <div id="terminal"></div>
 
 <div id="permissionPopup">
     <div id="popupBox">
-        <h3>File Access</h3>
-        <p>Select files that commands can read/write.</p>
-        <button id="chooseFiles">Choose Files</button>
+        <h3>Folder Access</h3>
+        <p>Select a folder so commands can read/write files.</p>
+        <button id="chooseFolder">Choose Folder</button>
     </div>
 </div>
 
+<!-- iOS fallback: invisible file input -->
+<input id="iosPicker" type="file" multiple style="display:none">
+
 <script>
-let files = {};
+let dirHandle = null;
 let buffer = "";
 let cursorVisible = true;
+
+// detect iOS for fallback
+const isiOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 
 const term = new Terminal({
     theme: { background: "#000", foreground: "#fff", cursor: "#ffffff" },
@@ -79,7 +93,7 @@ const term = new Terminal({
 
 term.open(document.getElementById("terminal"));
 
-term.writeln("iOS Terminal Ready (File Mode)");
+term.writeln("iOS Terminal Ready");
 term.write("$ ");
 
 setInterval(() => {
@@ -87,81 +101,69 @@ setInterval(() => {
     term.setOption("cursorStyle", cursorVisible ? "block" : "bar");
 }, 500);
 
-function pickFiles() {
-    return new Promise(res => {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.multiple = true;
-        input.accept = "*/*";
-        input.style.display = "none";
-        document.body.appendChild(input);
+// Try restoring directory permission (desktop only)
+(async () => {
+    if (isiOS) {
+        term.writeln("\niOS detected — folder access limited.");
+        term.writeln("Use file picker instead.\n");
+        return;
+    }
+
+    const saved = localStorage.getItem("dir_saved");
+    if (saved) {
+        try { dirHandle = await window.showDirectoryPicker(); } catch {}
+    }
+    if (dirHandle) {
+        document.getElementById("permissionPopup").style.display = "none";
+        term.writeln("Folder permission restored.");
+        term.write("$ ");
+    } else {
+        term.writeln("Waiting for folder permission...");
+    }
+})();
+
+// Choose folder button
+document.getElementById("chooseFolder").onclick = async () => {
+    if (isiOS) {
+        // fallback file picker for iOS
+        term.writeln("\niOS does not support folder selection.");
+        term.writeln("Choose files manually.");
+
+        const input = document.getElementById("iosPicker");
         input.onchange = () => {
-            res([...input.files]);
-            document.body.removeChild(input);
+            dirHandle = Array.from(input.files);  // store array of File objects
+            document.getElementById("permissionPopup").style.display = "none";
+            term.writeln("Loaded " + dirHandle.length + " files.");
+            term.write("$ ");
         };
         input.click();
-    });
-}
+        return;
+    }
 
-document.getElementById("chooseFiles").onclick = async () => {
-    const picked = await pickFiles();
-    picked.forEach(f => files[f.name] = f);
-    document.getElementById("permissionPopup").style.display = "none";
-    term.writeln("
-Files selected.");
-    term.write("$ ");
+    // Desktop / Android
+    try {
+        dirHandle = await window.showDirectoryPicker();
+        await dirHandle.requestPermission({ mode: "readwrite" });
+        localStorage.setItem("dir_saved", "yes");
+        document.getElementById("permissionPopup").style.display = "none";
+        term.writeln("\nFolder selected.");
+        term.write("$ ");
+    } catch {
+        term.writeln("\nPermission denied.");
+        term.write("$ ");
+    }
 };
 
-async function readFile(name) {
-    if (!files[name]) return "File not loaded";
-    return await files[name].text();
-}
-
-async function nanoEditor(filename) {
-    term.writeln(`Opening nano: ${filename}`);
-    term.writeln("--- Press CTRL+X to exit ---");
-
-    let existing = await readFile(filename);
-    if (existing === "File not loaded") existing = "";
-
-    let content = existing;
-    term.writeln(content);
-
-    const disposer = term.onData(async key => {
-        if (key === "") { // CTRL+X
-            disposer.dispose();
-            term.writeln("
-Cannot save: iOS browsers cannot overwrite files.");
-            term.write("$ ");
-        } else if (key === "
-") {
-            content += "
-";
-            term.write("
-");
-        } else if (key === "") {
-            content = content.slice(0, -1);
-            term.write(" ");
-        } else {
-            content += key;
-            term.write(key);
-        }
-    });
-}
-
 term.onData(data => {
-    if (data === "
-") {
+    if (data === "\r") {
         const cmd = buffer.trim(); buffer = "";
-        term.write("
-");
+        term.write("\n");
         handleCommand(cmd);
-        term.write("
-$ ");
-    } else if (data === "") {
+        term.write("\n$ ");
+    } else if (data === "\u007F") {
         if (buffer.length) {
             buffer = buffer.slice(0, -1);
-            term.write(" ");
+            term.write("\b \b");
         }
     } else {
         buffer += data;
@@ -169,44 +171,111 @@ $ ");
     }
 });
 
+async function realPing(host) {
+    const url = host.startsWith("http") ? host : `https://${host}`;
+    const start = performance.now();
+    try {
+        await fetch(url, { mode: "no-cors" });
+        return `Reply from ${host}: time=${Math.round(performance.now() - start)}ms`;
+    } catch {
+        return `Request timed out to ${host}`;
+    }
+}
+
+async function nanoEditor(filename) {
+    if (isiOS) return term.writeln("nano unavailable on iOS (no writable handles).");
+
+    term.writeln(`Opening nano: ${filename}`);
+    term.writeln("--- Press CTRL+X to save & exit ---");
+
+    let fileHandle;
+    let existing = "";
+
+    try {
+        fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+        const file = await fileHandle.getFile();
+        existing = await file.text();
+    } catch {}
+
+    let content = existing;
+    term.writeln(content);
+
+    const disposer = term.onData(async key => {
+        if (key === "\u0018") {
+            disposer.dispose();
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            term.writeln("\nSaved.");
+            term.write("$ ");
+        } else if (key === "\r") {
+            content += "\n";
+            term.write("\n");
+        } else if (key === "\u007F") {
+            content = content.slice(0, -1);
+            term.write("\b \b");
+        } else {
+            content += key;
+            term.write(key);
+        }
+    });
+}
+
 async function handleCommand(cmd) {
     if (!cmd) return;
     const [base, ...args] = cmd.split(" ");
 
     switch (base) {
-        case "cd":
-            if (!args[0]) return term.writeln("Usage: cd <folder>");
-            if (!dirHandle) return term.writeln("No folder selected.");
-            try {
-                dirHandle = await dirHandle.getDirectoryHandle(args[0]);
-                term.writeln("Moved into " + args[0]);
-            } catch {
-                term.writeln("Folder not found.");
-            }
-            break;
-
-        case "nano"::
+        case "nano":
             if (!args[0]) return term.writeln("Usage: nano <file>");
+            if (!dirHandle) return term.writeln("No folder selected.");
             nanoEditor(args[0]);
             break;
 
         case "help":
-            term.writeln("Commands: help, ls, dir, cd, mkdir, rmdir, del, cls, spec, echo, ping, web, credits, nano, exit");
+            term.writeln("Commands: help, ls, dir, mkdir, rmdir, del, cls, spec, echo, ping, web, credits, nano, exit");
             break;
 
         case "cls": term.clear(); break;
 
         case "ls":
-            Object.keys(files).forEach(n => term.writeln(n));
+        case "dir":
+            if (!dirHandle) return term.writeln("No folder/files selected.");
+
+            if (isiOS) {
+                dirHandle.forEach(f => term.writeln(f.name));
+            } else {
+                for await (const entry of dirHandle.values()) term.writeln(entry.name);
+            }
             break;
 
-        case "cat":
-            if (!args[0]) return term.writeln("Usage: cat <file>");
-            term.writeln(await readFile(args[0]));
+        case "mkdir":
+        case "rmdir":
+        case "del":
+            if (isiOS) return term.writeln("Not supported on iOS.");
             break;
 
         case "echo": term.writeln(args.join(" ")); break;
 
+        case "web":
+            if (!args[0]) return term.writeln("Usage: web <url>");
+            window.open(args[0], "_blank");
+            term.writeln("Opened " + args[0]);
+            break;
+
+        case "ping":
+            if (!args[0]) return term.writeln("Usage: ping <host>");
+            term.writeln("Pinging " + args[0] + "...");
+            term.writeln(await realPing(args[0]));
+            break;
+
+        case "spec":
+            term.writeln("Device: iOS WebKit");
+            term.writeln("UserAgent: " + navigator.userAgent);
+            term.writeln("Cores: " + navigator.hardwareConcurrency);
+            break;
+
+        case "credits": term.writeln("Adam T. Nassar"); break;
         case "exit": term.writeln("Goodbye!"); break;
 
         default:
